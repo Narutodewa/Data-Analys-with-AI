@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from .utils import infer_kind
+
 MAX_HISTORY = 30
 MAX_DATASETS = 50
 
@@ -54,6 +56,7 @@ class Dataset:
             "rows": int(len(self.df)),
             "cols": int(self.df.shape[1]),
             "columns": [str(c) for c in self.df.columns],
+            "kinds": {str(c): infer_kind(self.df[c].head(2000)) for c in self.df.columns},
             "can_undo": bool(self.history),
             "log": list(self.log),
             "meta": {k: v for k, v in self.meta.items() if k in ("schema", "source", "note")},

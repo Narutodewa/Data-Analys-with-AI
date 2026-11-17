@@ -7,6 +7,12 @@ import pandas as pd
 from .store import Dataset
 from .utils import infer_kind, is_numeric, jsonable
 
+try:  # lapisan ML opsional: tanpa scikit-learn semua fitur dasar tetap jalan
+    from .ml import fuzzy as _fuzzy, impute as _impute, outliers as _outliers, pii as _pii
+    HAS_ML = True
+except ImportError:  # pragma: no cover
+    HAS_ML = False
+
 MAX_ROWS_LISTED = 200
 _CURRENCY = r"[\s$€£%]|Rp\.?|IDR|USD"
 
@@ -77,6 +83,19 @@ def detect_issues(df: pd.DataFrame, ignored: set | None = None) -> list[dict]:
         na = s.isna()
         nun = s.nunique(dropna=True)
 
+        # 1b) data pribadi (PII)
+        if HAS_ML:
+            f = _pii.scan_column(s, str(col)) if s.dtype.kind not in "fb" else None
+            if f:
+                issues.append({
+                    "id": f"pii:{col}", "type": "pii", "column": col, "severity": "high",
+                    "title": f"Kolom '{col}' diduga berisi data pribadi ({f['type']})",
+                    "detail": f"Terdeteksi lewat {f['via']}" + (f" ({f['share']:.0%} nilai cocok)" if f["share"] else "") + f". Contoh tersamarkan: {f['example']}. Samarkan sebelum data dibagikan.",
+                    "count": int(s.notna().sum()), "pct": 100.0, "rows": [], "samples": [], "stats": {"jenis": f["type"]},
+                    "actions": [{"key": "mask", "label": "Samarkan (a***@x.com)"}, {"key": "hash", "label": "Pseudonim (hash)"}, {"key": "drop_column", "label": "Hapus kolom"}, {"key": "keep", "label": "Biarkan"}],
+                    "recommended": "keep",
+                })
+
         # 2) nilai kosong
         if na.any():
             cnt, pct = int(na.sum()), round(100 * na.mean(), 1)
@@ -92,11 +111,20 @@ def detect_issues(df: pd.DataFrame, ignored: set | None = None) -> list[dict]:
             if len(mode):
                 stats["mode"] = jsonable(mode.iloc[0])
                 actions.append({"key": "fill_mode", "label": f"Isi modus ({stats['mode']})"})
+            model_ok = HAS_ML and numeric and s.notna().sum() >= 10 and len(_impute.numeric_cols(df.drop(columns=[col]))) >= 1
+            if model_ok:
+                actions += [{"key": "fill_knn", "label": "Isi KNN (dari baris mirip)"}, {"key": "fill_iterative", "label": "Isi iteratif/MICE (regresi antar kolom)"}]
             actions += [
                 {"key": "fill_value", "label": "Isi nilai tertentu…", "needs_value": True},
                 {"key": "drop_column", "label": "Hapus kolom"},
                 {"key": "keep", "label": "Biarkan"},
             ]
+            note = None
+            if model_ok:
+                try:
+                    note = _impute.missingness_note(df, col)
+                except Exception:
+                    note = None
             if pct >= 60:
                 rec = "drop_column"
             elif numeric:
@@ -107,11 +135,13 @@ def detect_issues(df: pd.DataFrame, ignored: set | None = None) -> list[dict]:
                 rec = "fill_mode"
             else:
                 rec = "keep"
+            if note and "TIDAK acak" in note and pct < 60:
+                rec = "fill_knn"
             issues.append({
                 "id": f"missing:{col}", "type": "missing", "column": col,
                 "severity": "high" if pct >= 30 else "medium" if pct >= 5 else "low",
                 "title": f"Kolom '{col}': {cnt} nilai kosong ({pct}%)",
-                "detail": "Pilih: hapus baris, isi dengan statistik, isi manual, atau biarkan.",
+                "detail": "Pilih: hapus baris, isi dengan statistik/model, isi manual, atau biarkan." + (f" {note}" if note else ""),
                 "count": cnt, "pct": pct, "rows": _rows(df.index[na]), "samples": [],
                 "stats": stats, "actions": actions, "recommended": rec,
             })
@@ -195,6 +225,22 @@ def detect_issues(df: pd.DataFrame, ignored: set | None = None) -> list[dict]:
                     "recommended": "normalize",
                 })
 
+        # 5b) variasi mirip (typo/singkatan) lewat fuzzy matching
+        if HAS_ML and _is_stringy(s) and 2 <= nun <= 300 and infer_kind(s) == "categorical":
+            fm = _fuzzy.variant_mapping(s)
+            if fm:
+                raw = s.astype("string")
+                aff = raw.isin(list(fm.keys()))
+                issues.append({
+                    "id": f"fuzzy:{col}", "type": "fuzzy", "column": col, "severity": "low",
+                    "title": f"Kolom '{col}': {len(fm)} variasi mirip (kemungkinan typo, {int(aff.sum())} nilai)",
+                    "detail": "Pasangan: " + ", ".join(f"'{k}'→'{v}'" for k, v in list(fm.items())[:4]) + ". Periksa dulu: tidak semua nilai mirip itu sama.",
+                    "count": int(aff.sum()), "pct": round(100 * aff.mean(), 1), "rows": _rows(df.index[aff]), "samples": _sample(df, df.index[aff], col),
+                    "stats": {"mapping": fm},
+                    "actions": [{"key": "normalize", "label": "Gabungkan ke variasi terbanyak"}, {"key": "keep", "label": "Biarkan (memang beda)"}],
+                    "recommended": "keep",
+                })
+
         # 6) kolom konstan
         if n > 1 and nun == 1 and not na.any():
             issues.append({
@@ -205,6 +251,31 @@ def detect_issues(df: pd.DataFrame, ignored: set | None = None) -> list[dict]:
                 "actions": [{"key": "drop_column", "label": "Hapus kolom"}, {"key": "keep", "label": "Biarkan"}],
                 "recommended": "drop_column",
             })
+
+    # 7) anomali multivariat (baris janggal bila dilihat gabungan kolom) yang belum tertangkap outlier univariat
+    if HAS_ML and 50 <= n <= 30000:
+        try:
+            ncols = _outliers.numeric_cols(df)
+            if len(ncols) >= 2:
+                _, _, _, flagged = _outliers.score_rows(df, ncols, "iforest", 0.02)
+                uni = set()
+                for i in issues:
+                    if i["type"] == "outliers":
+                        c = i["column"]
+                        lo, hi = i["stats"]["lower"], i["stats"]["upper"]
+                        uni |= set(df.index[(df[c] < lo) | (df[c] > hi)])
+                ids = [i for i, f in zip(df.index, flagged) if f and i not in uni]
+                if len(ids) >= 3:
+                    issues.append({
+                        "id": "anomaly", "type": "anomaly", "column": None, "severity": "low",
+                        "title": f"{len(ids)} baris janggal secara multivariat",
+                        "detail": f"Tidak ekstrem di satu kolom mana pun, tetapi kombinasi {len(ncols)} kolom numeriknya jarang (Isolation Forest). Lihat penjelasan per baris di tab Analitik ML.",
+                        "count": len(ids), "pct": round(100 * len(ids) / n, 1), "rows": _rows(ids), "rows_all": [jsonable(i) for i in ids], "samples": [], "stats": {},
+                        "actions": [{"key": "drop_rows", "label": f"Hapus {len(ids)} baris"}, {"key": "keep", "label": "Biarkan"}],
+                        "recommended": "keep",
+                    })
+        except Exception:
+            pass
 
     order = {"high": 0, "medium": 1, "low": 2}
     issues.sort(key=lambda i: (order[i["severity"]], i["id"]))
@@ -251,10 +322,23 @@ def apply_action(ds: Dataset, issue_id: str, action: str, value=None) -> str:
                 mask = (new[col] < lo) | (new[col] > hi)
             elif typ == "mixed_type":
                 mask = new[col].notna() & _to_number(new[col]).isna()
+            elif typ == "anomaly":
+                mask = new.index.isin(issue["rows_all"])
             else:
                 raise ValueError("Aksi tidak berlaku.")
             msg = f"{int(mask.sum())} baris dihapus."
             new = new[~mask]
+    elif action in ("fill_knn", "fill_iterative"):
+        mask = new[col].isna()
+        filled = _impute.impute_column(new, col, "knn" if action == "fill_knn" else "iterative")
+        new[col] = new[col].astype("float64")
+        new.loc[mask, col] = filled[mask]
+        msg = f"{int(mask.sum())} nilai kosong diisi dengan imputasi {'KNN' if action == 'fill_knn' else 'iteratif (MICE)'}."
+    elif action in ("mask", "hash"):
+        kind = issue["stats"].get("jenis", "")
+        fn = (lambda v: _pii.mask_value(v, kind)) if action == "mask" else _pii.pseudonym
+        new[col] = new[col].map(lambda v: v if pd.isna(v) else fn(v)).astype("object")
+        msg = f"Kolom '{col}' {'disamarkan' if action == 'mask' else 'diganti pseudonim (hash)'}."
     elif action in ("fill_mean", "fill_median", "fill_mode", "fill_value"):
         if typ == "outliers":
             lo, hi = issue["stats"]["lower"], issue["stats"]["upper"]

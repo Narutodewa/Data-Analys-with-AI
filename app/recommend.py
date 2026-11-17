@@ -13,6 +13,11 @@ import pandas as pd
 from .charts import build_chart
 from .utils import as_datetime, infer_kind, is_numeric
 
+try:
+    from .ml import stats_tests as _st
+except ImportError:  # pragma: no cover
+    _st = None
+
 KEYWORDS = {
     "trend": ["tren", "trend", "waktu", "bulan", "tahun", "harian", "naik", "turun", "over time", "musim", "growth", "pertumbuhan"],
     "relation": ["hubungan", "korelasi", "pengaruh", "berkaitan", "relationship", "correlat", "faktor", "berdampak"],
@@ -49,8 +54,18 @@ def find_insights(df: pd.DataFrame) -> list[dict]:
     for c in miss[miss >= 0.2].index:
         add(0.5 + miss[c] / 2, f"'{c}' banyak yang kosong ({miss[c]:.0%})", "Hasil analisis yang memakai kolom ini bisa bias. Tinjau di tab Cleaning.", kind="quality")
 
-    # korelasi kuat
-    if len(nums) >= 2:
+    # hubungan antar kolom: uji statistik + FDR bila tersedia, jika tidak heuristik ambang
+    has_stats = False
+    if _st is not None:
+        try:
+            for i in _st.significant_insights(df):
+                out.append(i)
+            has_stats = True
+        except Exception:
+            has_stats = False
+
+    # korelasi kuat (cadangan)
+    if not has_stats and len(nums) >= 2:
         corr = df[nums].corr()
         seen = set()
         for i, a in enumerate(nums):
@@ -78,7 +93,7 @@ def find_insights(df: pd.DataFrame) -> list[dict]:
                         f"Korelasi linear terhadap waktu r = {r:.2f}.", {"type": "line", "x": dc, "y": nc, "agg": "mean"})
 
     # perbedaan antar segmen (eta^2)
-    for cc in cats[:6]:
+    for cc in ([] if has_stats else cats[:6]):
         for nc in nums[:6]:
             tmp = df[[cc, nc]].dropna()
             if len(tmp) < 20 or tmp[nc].var() == 0:

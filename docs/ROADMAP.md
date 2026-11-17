@@ -27,3 +27,6 @@ Fitur tambahan yang disarankan karena aplikasi ini berbasis AI. Urutan = perkira
 - [ ] Mode gelap grafik yang tervalidasi penuh, tabel alternatif aksesibilitas per grafik.
 - [ ] Tes UI end-to-end (Playwright) di CI.
 - [ ] i18n (Indonesia/Inggris).
+
+## Selesai: lapisan ML
+See README bagian *Lapisan statistik & ML*. Berikutnya: NER, SHAP, uji embedding end-to-end, penyimpanan dataset persisten.

@@ -1,0 +1,4 @@
+# Opsional (berat, ~1-2 GB): embedding teks/gambar. Tanpa ini mesin "embed_*" menampilkan pesan instalasi.
+sentence-transformers
+open_clip_torch
+torch

@@ -73,3 +73,25 @@ Lihat [docs/ROADMAP.md](docs/ROADMAP.md) untuk rencana berikutnya.
 
 ## Lisensi
 MIT
+
+## Lapisan statistik & ML (bukan hanya LLM)
+
+Prinsip: **mesin statistik/ML menghitung semua angka, aturan menjaga, LLM hanya menerjemahkan pertanyaan dan menarasikan hasil.** Setiap hasil memuat metode, asumsi, dan peringatan.
+
+| Mesin | Metode |
+|---|---|
+| Temuan terverifikasi | Spearman, Mann-Whitney/Kruskal, chi-square + koreksi FDR (Benjamini-Hochberg), effect size, mutual information |
+| Anomali | Isolation Forest, LOF, MAD (+ alasan per baris) |
+| Imputasi | KNN, iteratif/MICE, catatan apakah kosong tampak acak |
+| Typo kategori | fuzzy matching (rapidfuzz) |
+| Deret waktu | STL, Holt-Winters, changepoint, backtest vs baseline naif |
+| Segmentasi | k-means (silhouette) / HDBSCAN + PCA |
+| Prediksi / faktor | AutoML ringan: CV, baseline, permutation importance, deteksi kebocoran |
+| PII | regex + Luhn + nama kolom; samarkan/pseudonim |
+| Teks | TF-IDF + NMF topik, sentimen berbasis leksikon (kasar) |
+| Join & SQL | saran kunci join; SQL baca-saja (SQLite + authorizer) lintas dataset |
+| Gambar | near-duplicate (dHash); embedding opsional (`requirements-extra.txt`) |
+
+API: `GET /api/ml/catalog`, `POST /api/ml/run`, `POST /api/merge`. UI: tab **Analitik ML**.
+
+**Batasan jujur:** embedding teks/gambar belum diuji end-to-end (paket berat opsional); SHAP diganti permutation importance; NER belum ada; sentimen leksikon hanya kasar; ramalan dibandingkan baseline naif dan diberi peringatan bila tidak lebih baik.

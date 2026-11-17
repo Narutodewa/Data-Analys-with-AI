@@ -2,7 +2,7 @@
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const S = { list: [], cur: null, tab: "data", page: { offset: 0, sort: null, desc: false, q: "" }, chat: [], health: null };
-const TABS = [["data", "Data"], ["clean", "Cleaning"], ["eda", "EDA"], ["charts", "Grafik & Rekomendasi"], ["ask", "Tanya AI"], ["pivot", "Pivot & Rumus"]];
+const TABS = [["data", "Data"], ["clean", "Cleaning"], ["eda", "EDA"], ["charts", "Grafik & Rekomendasi"], ["ml", "Analitik ML"], ["ask", "Tanya AI"], ["pivot", "Pivot & Rumus"]];
 
 async function api(path, opts = {}) {
   const o = { ...opts };
@@ -87,7 +87,7 @@ function renderMain() {
   $("#head").querySelectorAll("[data-ex]").forEach((b) => (b.onclick = () => (location.href = `/api/datasets/${ds.id}/export?fmt=${b.dataset.ex}`)));
   $("#tabs").innerHTML = TABS.map(([k, l]) => `<button data-t="${k}" class="${S.tab === k ? "on" : ""}">${l}</button>`).join("");
   $("#tabs").onclick = (e) => { const b = e.target.closest("[data-t]"); if (b) { S.tab = b.dataset.t; renderMain(); } };
-  ({ data: viewData, clean: viewClean, eda: viewEda, charts: viewCharts, ask: viewAsk, pivot: viewPivot }[S.tab])(ds);
+  ({ data: viewData, clean: viewClean, eda: viewEda, charts: viewCharts, ml: viewMl, ask: viewAsk, pivot: viewPivot }[S.tab])(ds);
 }
 const view = () => $("#view");
 const loading = (t = "Memuat…") => (view().innerHTML = `<p class="muted spin">${t}</p>`);
@@ -215,7 +215,7 @@ async function viewCharts(ds) {
     $("#recout").innerHTML = '<p class="muted spin">Menganalisis…</p>';
     const r = await api(`/datasets/${ds.id}/recommend`, { json: { goal: $("#goal").value } });
     const out = $("#recout"); out.innerHTML = "";
-    if (r.insights.length) { const c = document.createElement("div"); c.className = "card"; c.innerHTML = `<h3 style="margin-top:0">${r.goal ? "Temuan terkait" : "Temuan & potensi masalah"}</h3>` + r.insights.map((i) => `<div class="insight"><b>${esc(i.title)}</b>${i.kind === "quality" ? ' <span class="tag">kualitas data</span>' : ""}<small>${esc(i.detail)}</small></div>`).join(""); out.append(c); }
+    if (r.insights.length) { const c = document.createElement("div"); c.className = "card"; c.innerHTML = `<h3 style="margin-top:0">${r.goal ? "Temuan terkait" : "Temuan & potensi masalah"}</h3>` + r.insights.map((i) => `<div class="insight"><b>${esc(i.title)}</b>${i.kind === "quality" ? ' <span class="tag">kualitas data</span>' : ""}<small>${esc(i.detail)}</small>${i.method ? `<small class="muted">Metode: ${esc(i.method)}${i.q != null ? ` · q=${esc(i.q)}` : ""}${i.effect_label ? ` · ${esc(i.effect_label)}` : ""}</small>` : ""}</div>`).join(""); out.append(c); }
     const g = document.createElement("div"); g.className = "grid"; g.append(...r.charts.map((c) => chartCard(c))); out.append(g);
     if (!r.insights.length && !r.charts.length) out.innerHTML = '<div class="card">Belum ada temuan menonjol. Coba tulis pertanyaan yang lebih spesifik atau gunakan tab “Tanya AI”.</div>';
   });
@@ -223,6 +223,59 @@ async function viewCharts(ds) {
     const ch = await api(`/datasets/${ds.id}/chart`, { json: { type: $("#b-t").value, x: $("#b-x").value || null, y: $("#b-y").value || null, color: $("#b-c").value || null, agg: $("#b-a").value } });
     $("#bout").replaceChildren(chartCard(ch));
   });
+}
+
+/* ---------------------------------------------------------------------- ML */
+const ML = { cat: null, engine: "insights" };
+async function viewMl(ds) {
+  if (!ML.cat) ML.cat = (await api("/ml/catalog")).engines;
+  const eng = () => ML.cat.find((e) => e.id === ML.engine) || ML.cat[0];
+  const cols = ds.columns, kinds = ds.kinds || {};
+  view().innerHTML = `<div class="card"><h3 style="margin-top:0">🧠 Analitik statistik &amp; ML</h3>
+   <p class="muted">Semua angka dihitung metode statistik/ML (bukan LLM) dan menyertakan metode, asumsi, dan peringatan. LLM hanya dipakai di tab Tanya AI untuk menerjemahkan pertanyaan & menjelaskan hasil.</p>
+   <div class="form"><label>Analisis<select id="ml-e">${ML.cat.map((e) => `<option value="${e.id}" ${e.id === ML.engine ? "selected" : ""} ${e.available ? "" : "disabled"}>${esc(e.title)}${e.available ? "" : " (butuh paket tambahan)"}</option>`).join("")}</select></label></div>
+   <p class="muted" id="ml-d"></p><div class="form" id="ml-p"></div><div class="form"><button class="primary" id="ml-go">Jalankan</button></div></div><div id="ml-out"></div>`;
+  const opts = (kind) => cols.filter((c) => !kind || kind === "any" || !kinds[c] || kinds[c] === kind || (kind === "numeric" && kinds[c] === "numeric")).map((c) => `<option>${esc(c)}</option>`).join("");
+  const form = () => {
+    const e = eng(); $("#ml-d").textContent = e.desc;
+    $("#ml-p").innerHTML = e.params.map((p) => {
+      const id = `mp-${p.name}`, lab = esc(p.label || p.name), t = p.type;
+      if (t === "select") return `<label>${lab}<select id="${id}">${p.options.map((o) => `<option ${o === p.default ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
+      if (t === "number") return `<label>${lab}<input id="${id}" type="number" step="any" value="${p.default ?? ""}" style="width:110px"></label>`;
+      if (t.startsWith("columns:")) return `<label>${lab}<select id="${id}" multiple size="4">${opts(t.split(":")[1])}</select></label>`;
+      if (t.startsWith("column:")) return `<label>${lab}<select id="${id}">${p.optional ? '<option value="">—</option>' : ""}${opts(t.split(":")[1])}</select></label>`;
+      return `<label>${lab}<input id="${id}" value="${esc(p.default ?? "")}"></label>`;
+    }).join("");
+  };
+  const collect = () => { const o = {}; eng().params.forEach((p) => { const el = $(`#mp-${p.name}`); if (!el) return; if (p.type.startsWith("columns:")) { const v = [...el.selectedOptions].map((x) => x.value); if (v.length) o[p.name] = v; } else if (p.type === "number") { if (el.value !== "") o[p.name] = Number(el.value); } else if (el.value !== "") o[p.name] = el.value; }); return o; };
+  const table = (t) => { const w = document.createElement("div"); w.className = "card"; w.innerHTML = `<h4 style="margin:0 0 8px">${esc(t.title)}</h4><div class="tablewrap"><table><tr>${t.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>${t.rows.map((r) => `<tr>${r.map((v) => `<td class="${typeof v === "number" ? "num" : ""}">${esc(fmt(v))}</td>`).join("")}</tr>`).join("")}</table></div>`; return w; };
+  const render = (r) => {
+    const out = $("#ml-out"); out.innerHTML = "";
+    const head = document.createElement("div"); head.className = "card";
+    head.innerHTML = `<h3 style="margin-top:0">${esc(r.title)}</h3><p>${esc(r.summary)}</p><p class="muted"><b>Metode:</b> ${esc(r.method)}</p>` +
+      (r.warnings?.length ? `<div class="insight"><b>⚠ Peringatan</b>${r.warnings.map((w) => `<small>${esc(w)}</small>`).join("")}</div>` : "") +
+      (r.assumptions?.length ? `<details><summary class="muted">Asumsi & batasan</summary>${r.assumptions.map((a) => `<small class="muted" style="display:block">• ${esc(a)}</small>`).join("")}</details>` : "");
+    const acts = document.createElement("div"); acts.className = "form"; acts.style.marginTop = "10px";
+    (r.actions || []).forEach((a) => {
+      const b = document.createElement("button"); b.className = "primary"; b.textContent = a.label;
+      b.onclick = guard(async () => {
+        if (a.type === "delete_rows" || a.type === "delete_rows_by_filename") { if (!confirm(a.label + "? (bisa di-undo)")) return; await api(`/datasets/${ds.id}/ml/apply`, { json: { type: a.type, rows: a.rows, filenames: a.filenames } }); toast("Selesai"); refreshList(); }
+        else if (a.type === "add_column") { const x = await api("/ml/run", { json: { engine: ML.engine, dataset_id: ds.id, params: { ...collect(), ...a.params } } }); toast(`Kolom '${x.applied.column}' ditambahkan`); S.tab = "data"; refreshList(); }
+        else if (a.type === "merge") { const x = await api("/merge", { json: { left_id: a.left_id, right_id: a.right_id, left_on: a.left_on, right_on: a.right_on, how: a.how || "left" } }); toast("Dataset gabungan dibuat"); S.tab = "data"; refreshList(x.datasets[0].id); }
+      });
+      acts.append(b);
+    });
+    if (acts.children.length) head.append(acts);
+    out.append(head);
+    (r.tables || []).forEach((t) => out.append(table(t)));
+    const g = document.createElement("div"); g.className = "grid"; g.append(...(r.charts || []).map((c) => chartCard(c))); out.append(g);
+  };
+  $("#ml-e").onchange = () => { ML.engine = $("#ml-e").value; form(); };
+  $("#ml-go").onclick = guard(async () => {
+    $("#ml-out").innerHTML = '<p class="muted spin">Menghitung…</p>';
+    try { render(await api("/ml/run", { json: { engine: ML.engine, dataset_id: ds.id, params: collect() } })); } catch (e) { $("#ml-out").innerHTML = ""; throw e; }
+  });
+  form();
 }
 
 /* --------------------------------------------------------------------- ASK */
@@ -238,7 +291,7 @@ function viewAsk(ds) {
     S.chat.push({ role: "user", content: q }); draw(); chat.insertAdjacentHTML("beforeend", '<div class="msg ai spin">Berpikir…</div>');
     try {
       const r = await api(`/datasets/${ds.id}/ask`, { json: { question: q, history: S.chat.slice(0, -1).map(({ role, content }) => ({ role, content })) } });
-      S.chat.push({ role: "assistant", content: r.answer, extra: () => { const n = []; r.charts.forEach((c) => n.push(chartCard(c))); if (r.table) { const w = document.createElement("div"); w.className = "tablewrap"; w.style.marginTop = "8px"; w.innerHTML = `<table><tr>${r.table.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>${r.table.rows.map((row) => `<tr>${row.map((v) => `<td class="${typeof v === "number" ? "num" : ""}">${esc(fmt(v))}</td>`).join("")}</tr>`).join("")}</table>`; n.push(w); } return n; } });
+      S.chat.push({ role: "assistant", content: r.answer, extra: () => { const n = []; r.charts.forEach((c) => n.push(chartCard(c))); if (r.method) { const m = document.createElement("small"); m.className = "muted"; m.textContent = "Metode: " + r.method; n.push(m); } if (r.table) { const w = document.createElement("div"); w.className = "tablewrap"; w.style.marginTop = "8px"; w.innerHTML = `<table><tr>${r.table.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>${r.table.rows.map((row) => `<tr>${row.map((v) => `<td class="${typeof v === "number" ? "num" : ""}">${esc(fmt(v))}</td>`).join("")}</tr>`).join("")}</table>`; n.push(w); } return n; } });
     } catch (e) { S.chat.pop(); S.chat.push({ role: "user", content: q }); toast(e.message, true); }
     draw();
   });

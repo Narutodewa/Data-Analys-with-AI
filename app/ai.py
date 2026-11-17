@@ -16,6 +16,8 @@ import httpx
 import pandas as pd
 
 from . import cleaning, recommend
+from . import ml
+from .ml import sqlq
 from .charts import AGGS, CHART_TYPES, build_chart
 from .eda import column_profile
 from .store import Dataset
@@ -128,7 +130,16 @@ Balas HANYA dengan satu objek JSON (tanpa markdown) berformat:
 {"answer": "penjelasan singkat", 
  "charts": [{"title": "...", "type": "<%s>", "x": "kolom|null", "y": "kolom|null", "color": "kolom|null", "agg": "<%s>"}],
  "query": null | {"filters":[{"col":"..","op":"==|!=|>|>=|<|<=|contains|in|isnull|notnull","value":..}], "groupby":["kolom"], "agg":{"kolom":"sum|mean|median|min|max|count|nunique|std"}, "sort":{"by":"kolom","desc":true}, "limit":20}}
-Aturan: pakai hanya nama kolom yang ada di konteks. Maksimal 3 diagram. Gunakan "query" bila pertanyaan butuh angka pasti (top-N, total per grup); sistem akan menjalankannya pada data penuh dan menampilkan hasilnya.""" % ("|".join(CHART_TYPES), "|".join(AGGS))
+Aturan: pakai hanya nama kolom yang ada di konteks. Maksimal 3 diagram. Gunakan "query" bila pertanyaan butuh angka pasti (top-N, total per grup); sistem akan menjalankannya pada data penuh dan menampilkan hasilnya.
+
+MESIN ANALITIK (statistik/ML yang menghitung; kamu TIDAK boleh menghitung sendiri). Tambahkan kunci opsional:
+ "analysis": {"engine": "insights|anomalies|segment|timeseries|predict|pii|text|images_dup|joins", "params": {...}}
+ - insights: temuan terverifikasi statistik {} ; anomalies: {"method":"iforest|lof|mad","columns":[..]} ; segment: {"method":"kmeans|hdbscan","k":int|null,"columns":[..]}
+ - timeseries: {"date":"kolom","value":"kolom","agg":"sum|mean|median|min|max|count","horizon":int|null} ; predict: {"target":"kolom","features":[..]|null} (faktor yang memengaruhi / prediksi)
+ - pii: {} ; text: {"column":"kolom"} ; images_dup: {} ; joins: {}
+ "sql": null | "SELECT ..." (baca-saja, lintas dataset; nama tabel ada di konteks "tables").
+Pakai analysis untuk pertanyaan tentang prediksi, faktor berpengaruh, anomali, segmentasi, tren/ramalan, data pribadi, topik teks. Setelah mesin berjalan, sistem akan memintamu menjelaskan hasilnya.
+""" % ("|".join(CHART_TYPES), "|".join(AGGS))
 
 
 def _extract_json(text: str) -> dict:
@@ -142,22 +153,82 @@ def _extract_json(text: str) -> dict:
         return {"answer": text, "charts": [], "query": None}
 
 
-def ask(ds: Dataset, question: str, history: list[dict] | None = None) -> dict:
-    """Tanya jawab. Dengan AI -> jawaban + diagram + kueri; tanpa AI -> rekomendasi heuristik."""
+ENGINE_HINTS = [
+    ("anomalies", ("anomali", "janggal", "aneh", "pencilan", "outlier multivariat")),
+    ("segment", ("segmen", "klaster", "cluster", "kelompokkan", "pengelompokan")),
+    ("pii", ("pii", "data pribadi", "sensitif", "privasi", "pribadi")),
+    ("timeseries", ("ramal", "forecast", "prediksi ke depan", "musiman", "tren")),
+    ("predict", ("prediksi", "memprediksi", "faktor", "memengaruhi", "mempengaruhi", "berpengaruh", "penyebab")),
+    ("insights", ("temuan", "insight", "hubungan", "korelasi", "menarik", "pola")),
+    ("images_dup", ("duplikat gambar", "gambar mirip", "gambar kembar")),
+]
+
+
+def route_offline(ds: Dataset, question: str) -> tuple[str, dict] | None:
+    """Tanpa LLM: petakan pertanyaan ke mesin analitik lewat kata kunci + nama kolom yang disebut."""
+    q = question.lower()
+    mentioned = [c for c in ds.df.columns if str(c).lower().replace("_", " ") in q.replace("_", " ")]
+    from .utils import infer_kind
+    kinds = {c: infer_kind(ds.df[c]) for c in ds.df.columns}
+    dts = [c for c in mentioned if kinds[c] == "datetime"] or [c for c, k in kinds.items() if k == "datetime"]
+    nums = [c for c in mentioned if kinds[c] == "numeric"]
+    for engine, words in ENGINE_HINTS:
+        if any(w in q for w in words):
+            if engine == "timeseries":
+                if not dts or not (nums or [c for c, k in kinds.items() if k == "numeric"]):
+                    continue
+                return engine, {"date": dts[0], "value": (nums or [c for c, k in kinds.items() if k == "numeric"])[0], "agg": "sum"}
+            if engine == "predict":
+                if not mentioned:
+                    continue
+                return engine, {"target": mentioned[0]}
+            if engine == "images_dup" and ds.kind != "image":
+                continue
+            return engine, {}
+    return None
+
+
+NARRATE_SYS = ("Kamu analis data. Tulis jawaban Bahasa Indonesia ringkas (3-6 kalimat) untuk pertanyaan pengguna, HANYA berdasarkan hasil mesin statistik/ML di bawah. "
+               "Jangan menambah atau mengubah angka. Sebutkan peringatan/batasan penting (mis. tidak mengalahkan baseline, data kecil, korelasi bukan sebab-akibat). Tanpa markdown berat.")
+
+
+def _engine_payload(res: dict) -> dict:
+    keep = {k: v for k, v in (res.get("stats") or {}).items() if not isinstance(v, (list, dict)) or len(str(v)) < 300}
+    return {"judul": res["title"], "metode": res["method"], "ringkasan": res["summary"], "asumsi": res["assumptions"], "peringatan": res["warnings"], "statistik": keep,
+            "tabel": [{"judul": t["title"], "kolom": t["columns"], "baris": t["rows"][:8]} for t in res["tables"][:2]]}
+
+
+def _table_of(res: dict):
+    return None
+
+
+def ask(ds: Dataset, question: str, history: list[dict] | None = None, all_datasets: list | None = None) -> dict:
+    """Tanya jawab. LLM merencanakan (diagram/kueri/mesin), backend menghitung, LLM menarasikan. Tanpa LLM: pemetaan kata kunci ke mesin."""
     df = ds.df
+    all_datasets = all_datasets or [ds]
     if not config.enabled:
+        route = route_offline(ds, question)
+        if route:
+            try:
+                res = ml.run(route[0], ds, route[1], all_datasets)
+                ans = f"Mode offline (tanpa LLM): saya menjalankan mesin '{res['title']}'.\n{res['summary']}" + ("\nPeringatan: " + "; ".join(res["warnings"][:3]) if res["warnings"] else "")
+                return {"answer": ans, "charts": res["charts"][:3], "table": None, "tables": res["tables"][:2], "method": res["method"], "mode": "offline"}
+            except ValueError as e:
+                return {"answer": f"Mesin '{route[0]}' tidak bisa dijalankan: {e}", "charts": [], "table": None, "mode": "offline"}
         rec = recommend.suggest(df, question)
         lines = [f"- {i['title']}" for i in rec["insights"][:5]]
         ans = ("Mode offline (AI belum dikonfigurasi), jadi saya memakai analisis otomatis. "
                + ("Temuan yang relevan:\n" + "\n".join(lines) if lines else "Belum ada temuan menonjol.")
-               + "\n\nAktifkan AI lewat tombol ⚙ untuk jawaban yang lebih fleksibel.")
+               + "\n\nAktifkan LLM lewat tombol ⚙ untuk jawaban yang lebih fleksibel.")
         return {"answer": ans, "charts": rec["charts"][:3], "table": None, "mode": "offline"}
 
+    ctx = json.loads(dataset_context(ds))
+    ctx["tables"] = sqlq.schema_text(all_datasets).splitlines()
     msgs = [{"role": m["role"], "content": m["content"]} for m in (history or [])[-6:] if m.get("role") in ("user", "assistant")]
-    msgs.append({"role": "user", "content": f"KONTEKS DATA:\n{dataset_context(ds)}\n\nPERTANYAAN: {question}"})
+    msgs.append({"role": "user", "content": f"KONTEKS DATA:\n{json.dumps(ctx, ensure_ascii=False)}\n\nPERTANYAAN: {question}"})
     raw = complete(SYSTEM_ASK, msgs, max_tokens=1800)
     plan = _extract_json(raw)
-    charts, errors = [], []
+    charts, errors, tables_out, method = [], [], [], None
     for spec in (plan.get("charts") or [])[:3]:
         try:
             spec = {k: spec.get(k) for k in ("title", "type", "x", "y", "color", "agg")}
@@ -171,10 +242,32 @@ def ask(ds: Dataset, question: str, history: list[dict] | None = None) -> dict:
             table = {"columns": list(t.columns), "rows": jsonable(t.astype(object).where(t.notna(), None).values.tolist())}
         except Exception as e:
             errors.append(f"Kueri gagal: {e}")
+    if plan.get("sql"):
+        try:
+            t = sqlq.run_sql(all_datasets, str(plan["sql"]), limit=100)
+            table = {"columns": [str(c) for c in t.columns], "rows": jsonable(t.astype(object).where(t.notna(), None).values.tolist())}
+            method = "SQL baca-saja"
+        except Exception as e:
+            errors.append(f"SQL gagal: {e}")
     ans = str(plan.get("answer") or "")
-    if errors and not charts and not table:
-        ans += "\n\n(Catatan: saya tidak berhasil membuat diagram/kueri dari usulan AI: " + "; ".join(errors[:2]) + ")"
-    return {"answer": ans, "charts": charts, "table": table, "mode": "ai"}
+    an = plan.get("analysis")
+    if isinstance(an, dict) and an.get("engine") in ml.CATALOG:
+        try:
+            res = ml.run(an["engine"], ds, an.get("params") or {}, all_datasets)
+            charts += res["charts"][:3]
+            tables_out = res["tables"][:2]
+            method = res["method"]
+            try:  # LLM hanya menarasikan; angka dari mesin
+                ans = complete(NARRATE_SYS, [{"role": "user", "content": f"PERTANYAAN: {question}\n\nHASIL MESIN:\n{json.dumps(_engine_payload(res), ensure_ascii=False)}"}], max_tokens=700).strip() or res["summary"]
+            except AIError:
+                ans = res["summary"]
+            if res["warnings"]:
+                ans += "\n\nPeringatan: " + "; ".join(res["warnings"][:3])
+        except (ValueError, KeyError) as e:
+            errors.append(f"Mesin '{an.get('engine')}' gagal: {e}")
+    if errors and not charts and not table and not tables_out:
+        ans += "\n\n(Catatan: saya tidak berhasil menjalankan usulan AI: " + "; ".join(errors[:2]) + ")"
+    return {"answer": ans, "charts": charts, "table": table, "tables": tables_out, "method": method, "mode": "ai"}
 
 
 def clean_advice(ds: Dataset) -> dict:

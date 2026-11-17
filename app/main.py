@@ -11,7 +11,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, ai, cleaning, eda, ingest, recommend, tables
+from . import __version__, ai, cleaning, eda, ingest, ml, recommend, tables
+from .ml import joins as ml_joins
 from .charts import CHART_TYPES, AGGS, auto_charts, build_chart
 from .store import Dataset, store
 from .utils import jsonable
@@ -332,7 +333,76 @@ class AskIn(BaseModel):
 def ask(ds_id: str, body: AskIn):
     if not body.question.strip():
         raise ValueError("Pertanyaan kosong.")
-    return ai.ask(_ds(ds_id), body.question, body.history)
+    return ai.ask(_ds(ds_id), body.question, body.history, store.list())
+
+
+# ------------------------------------------------------------- analitik ML
+@app.get("/api/ml/catalog")
+def ml_catalog():
+    return {"engines": ml.catalog()}
+
+
+class MLRunIn(BaseModel):
+    engine: str
+    dataset_id: str | None = None
+    params: dict | None = None
+
+
+@app.post("/api/ml/run")
+def ml_run(body: MLRunIn):
+    """Satu pintu untuk semua mesin analitik. Mesin 'segment' dengan params.apply=true menambahkan kolom segmen ke data."""
+    ds = store.get(body.dataset_id) if body.dataset_id else None
+    params = dict(body.params or {})
+    res = ml.run(body.engine, ds, params, store.list())
+    if body.engine == "segment" and params.get("apply"):
+        labels = res.pop("labels", {})
+        name = "segmen"
+        while name in ds.df.columns:
+            name += "_2"
+        ds.snapshot(f"Tambah kolom '{name}' (segmentasi)")
+        new = ds.df.copy()
+        new[name] = pd.Series({k: v for k, v in labels.items()}).rename(index=lambda k: int(k) if str(k).lstrip("-").isdigit() else k).reindex(new.index)
+        ds.df = new
+        res["applied"] = {"column": name, "dataset": ds.summary()}
+    res.get("stats", {}).pop("labels", None)
+    return res
+
+
+class MLApplyIn(BaseModel):
+    type: str
+    rows: list[int] | None = None
+    filenames: list[str] | None = None
+
+
+@app.post("/api/datasets/{ds_id}/ml/apply")
+def ml_apply(ds_id: str, body: MLApplyIn):
+    ds = _ds(ds_id)
+    if body.type == "delete_rows":
+        n = cleaning.delete_rows(ds, body.rows or [])
+    elif body.type == "delete_rows_by_filename" and "filename" in ds.df.columns:
+        rows = ds.df.index[ds.df["filename"].isin(body.filenames or [])].tolist()
+        n = cleaning.delete_rows(ds, rows)
+    else:
+        raise ValueError("Jenis aksi tidak dikenal.")
+    return {"deleted": n, "dataset": ds.summary()}
+
+
+class MergeIn(BaseModel):
+    left_id: str
+    right_id: str
+    left_on: str
+    right_on: str
+    how: str = "left"
+    name: str | None = None
+
+
+@app.post("/api/merge")
+def merge(body: MergeIn):
+    l, r = _ds(body.left_id), _ds(body.right_id)
+    out = ml_joins.merge(l.df, r.df, body.left_on, body.right_on, body.how)
+    new = Dataset(body.name or f"{l.name} + {r.name}", out, meta={"source": "merge", "note": f"Gabungan {body.how} join pada {body.left_on} = {body.right_on}."})
+    store.add(new)
+    return {"datasets": [new.summary()], "errors": []}
 
 
 # -------------------------------------------------------------------- gambar
