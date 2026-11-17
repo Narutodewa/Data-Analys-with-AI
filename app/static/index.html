@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Analyst with AI</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%F0%9F%93%8A%3C/text%3E%3C/svg%3E">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" onerror="var s=document.createElement('script');s.src='/static/vendor/plotly.min.js';document.head.appendChild(s)"></script>
+</head>
+<body>
+<aside id="side">
+  <h1>📊 Data Analyst <span>with AI</span></h1>
+  <div id="drop" tabindex="0">
+    <b>Tarik file ke sini</b><br>atau klik untuk memilih<br>
+    <small>CSV · Excel · JSON/JSONL · SQL · SQLite · Parquet · TXT · Gambar · ZIP</small>
+    <input id="file" type="file" multiple hidden>
+  </div>
+  <div class="row">
+    <button id="btn-paste" class="ghost">Tempel teks</button>
+    <button id="btn-sample" class="ghost">Data contoh</button>
+  </div>
+  <h2>Dataset</h2>
+  <ul id="dslist"></ul>
+  <div class="grow"></div>
+  <div id="ai-chip" class="chip"></div>
+  <button id="btn-ai" class="ghost">⚙ Pengaturan AI</button>
+</aside>
+
+<main>
+  <div id="empty" class="card">
+    <h2>Mulai dengan memasukkan data</h2>
+    <p>Unggah file, tempel data, atau coba <b>Data contoh</b>. Lalu bersihkan data, jelajahi, dan minta AI mencari masalah dan membuat visual otomatis.</p>
+  </div>
+  <div id="work" hidden>
+    <header id="head"></header>
+    <nav id="tabs"></nav>
+    <section id="view"></section>
+  </div>
+</main>
+
+<dialog id="dlg"></dialog>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
