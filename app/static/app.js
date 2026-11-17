@@ -39,7 +39,7 @@ async function upload(files) {
 }
 const drop = $("#drop");
 drop.onclick = () => $("#file").click();
-drop.onkeydown = (e) => e.key === "Enter" && $("#file").click();
+drop.onkeydown=(e)=>{if(e.key==="Enter")$("#file").click()};
 $("#file").onchange = guard((e) => { upload(e.target.files); e.target.value = ""; });
 ["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
@@ -123,7 +123,7 @@ async function viewData(ds) {
   html += `</tbody></table></div><div class="toolbar" style="margin-top:10px"><button id="pv" ${p.offset ? "" : "disabled"}>← Sebelumnya</button><span class="muted">${r.total ? p.offset + 1 : 0}–${Math.min(p.offset + 100, r.total)} dari ${r.total}</span><button id="nx" ${p.offset + 100 < r.total ? "" : "disabled"}>Berikutnya →</button><span class="muted">· klik dua kali sel untuk mengedit · klik judul kolom untuk mengurutkan</span></div>`;
   view().innerHTML = html;
   const go = () => { p.q = $("#q").value; p.offset = 0; renderMain(); };
-  $("#qs").onclick = go; $("#q").onkeydown = (e) => e.key === "Enter" && go();
+  $("#qs").onclick = go; $("#q").onkeydown=(e)=>{if(e.key==="Enter")go()};
   $("#pv").onclick = () => { p.offset = Math.max(0, p.offset - 100); renderMain(); };
   $("#nx").onclick = () => { p.offset += 100; renderMain(); };
   view().querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => { const c = th.dataset.sort; if (c === "_row") { p.sort = null; p.desc = false; } else { p.desc = p.sort === c ? !p.desc : false; p.sort = c; } p.offset = 0; renderMain(); }));
@@ -242,7 +242,7 @@ function viewAsk(ds) {
     } catch (e) { S.chat.pop(); S.chat.push({ role: "user", content: q }); toast(e.message, true); }
     draw();
   });
-  $("#qgo").onclick = send; $("#qi").onkeydown = (e) => e.key === "Enter" && send();
+  $("#qgo").onclick = send; $("#qi").onkeydown=(e)=>{if(e.key==="Enter")send()};
 }
 
 /* ------------------------------------------------------------------- PIVOT */
