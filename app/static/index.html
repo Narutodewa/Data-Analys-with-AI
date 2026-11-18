@@ -15,8 +15,10 @@
     <b>Tarik file ke sini</b><br>atau klik untuk memilih<br>
     <small>CSV · Excel · JSON/JSONL · SQL · SQLite · Parquet · TXT · Gambar · ZIP</small>
     <input id="file" type="file" multiple hidden>
+    <input id="folder" type="file" webkitdirectory directory multiple hidden>
   </div>
   <div class="row">
+    <button id="btn-folder" class="ghost" title="Pilih satu folder berisi gambar/file data">Pilih folder</button>
     <button id="btn-paste" class="ghost">Tempel teks</button>
     <button id="btn-sample" class="ghost">Data contoh</button>
   </div>

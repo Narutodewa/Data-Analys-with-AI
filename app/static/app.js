@@ -43,7 +43,28 @@ drop.onkeydown=(e)=>{if(e.key==="Enter")$("#file").click()};
 $("#file").onchange = guard((e) => { upload(e.target.files); e.target.value = ""; });
 ["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
-drop.addEventListener("drop", guard((e) => upload(e.dataTransfer.files)));
+const OKEXT = /\.(csv|tsv|txt|dat|xlsx|xlsm|xls|json|jsonl|ndjson|sql|db|sqlite|sqlite3|parquet|zip|png|jpe?g|gif|bmp|webp|tiff?)$/i;
+async function readEntry(en, out) {  // telusuri folder (juga subfolder) hasil drag & drop
+  if (en.isFile) { const f = await new Promise((ok, no) => en.file(ok, no)); out.push(f); }
+  else if (en.isDirectory) {
+    const rd = en.createReader();
+    for (;;) { const batch = await new Promise((ok, no) => rd.readEntries(ok, no)); if (!batch.length) break; for (const c of batch) await readEntry(c, out); }
+  }
+}
+async function uploadFolder(files) {
+  const all = [...files], ok = all.filter((f) => OKEXT.test(f.name)), skipped = all.length - ok.length;
+  if (!ok.length) return toast("Tidak ada file yang didukung di folder itu.", true);
+  if (skipped) toast(`${skipped} file tidak didukung dilewati`);
+  const CH = 500;  // kirim bertahap agar permintaan tidak terlalu besar
+  for (let i = 0; i < ok.length; i += CH) await upload(ok.slice(i, i + CH));
+}
+$("#btn-folder").onclick = () => $("#folder").click();
+$("#folder").onchange = guard((e) => { uploadFolder(e.target.files); e.target.value = ""; });
+drop.addEventListener("drop", guard(async (e) => {
+  const items = [...(e.dataTransfer.items || [])].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (items.some((en) => en.isDirectory)) { const out = []; for (const en of items) await readEntry(en, out); return uploadFolder(out); }
+  return upload(e.dataTransfer.files);
+}));
 $("#btn-sample").onclick = guard(async () => addDatasets(await api("/sample", { method: "POST" })));
 $("#dslist").onclick = guard(async (e) => {
   const del = e.target.closest("[data-del]");
